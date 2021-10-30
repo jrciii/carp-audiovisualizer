@@ -1,0 +1,202 @@
+(load "../carp-pulseaudio/pulseaudio.carp")
+(load "../carp-fftw/FFTW.carp")
+(load-and-use SDL_ttf)
+(use PulseAudio)
+(def *RATE* 44100)
+(def *FRAMES* 1)
+(def *SPF* (/ *RATE* *FRAMES*))
+
+(defmacro when [pred :rest rest]
+  `(if %pred (do %@rest) ()))
+
+(defmacro unless [pred :rest rest]
+  `(if %pred () (do %@rest)))
+
+(defmacro do-range [counter start end step :rest body]
+  `(let-do [%counter %start]
+     (while (< %counter %end)
+       (do %@body (set! %counter (+ %counter %step))))))
+
+;(use PulseAudio)
+(sig context-state-cb (Fn [(Ptr Context) (Ptr ThreadedMainLoop)] ()))
+(defn context-state-cb [context mainloop]
+  (do
+    ;; (IO.println "Context State CB")
+    (threaded-mainloop-signal mainloop 0)))
+
+(sig stream-notify-cb (Fn [(Ptr Stream) (Ptr ())] ()))
+(defn stream-notify-cb [stream userdata]
+  (let-do [state (stream-get-state stream)]
+    ;; (println* "Stream state: " &(str (enum-to-int state)))
+    ()))
+
+(sig cvp (Fn [] (Ptr CVoid)))
+(defn cvp [] NULL)
+
+(deftemplate vtof (Fn [(Ptr CVoid)] (Ptr Float))
+  "float* $NAME (const void* c)"
+  "$DECL {
+    return (float*)c;
+  }")
+
+(deftemplate sizet (Fn [Int] SizeT)
+  "size_t $NAME (int x)"
+  "$DECL {
+    return (size_t)x;
+  }")
+
+(deftemplate sizetgt0 (Fn [SizeT] Bool)
+  "bool $NAME (size_t x)"
+  "$DECL {
+    return x > 0;
+  }")
+
+(deftemplate sizetuint (Fn [SizeT] Uint64)
+  "unsigned int $NAME (size_t x)"
+  "$DECL {
+    return (unsigned int)x;
+  }")
+
+(deftemplate sizetint (Fn [SizeT] Int)
+  "unsigned int $NAME (size_t x)"
+  "$DECL {
+    return (int)x;
+  }")
+
+(deftemplate from-cstring (Fn [(Ref CString)] (Ref String))
+  "char** $NAME (const char** c)"
+  "$DECL {
+    return (char**)c;
+  }")
+
+(register cfwrite (Fn [(Ptr CVoid) SizeT SizeT (Ptr FILE)] SizeT) "fwrite")
+
+;; (deftype State [lc (Ptr Float), rc (Ptr Float), samples Int])
+;; (def *APP-STATE* (State.init (Pointer.address &(Array.allocate *SPF*)) (Pointer.address &(Array.allocate *SPF*)) 0))
+(def *SAMPLES* 0)
+(def *LEFT-CHANNEL-IN* (alloc-real (SizeT.from-uint (Uint64.from-long (Long.from-int *SPF*)))))
+(def *LEFT-CHANNEL-OUT* (alloc-real (SizeT.from-uint (Uint64.from-long (Long.from-int *SPF*)))))
+(def *LEFT-PLAN* (plan-r2r-1d *SPF* *LEFT-CHANNEL-IN* *LEFT-CHANNEL-OUT* FFTWR2HC FFTWEstimate))
+(def *RIGHT-CHANNEL-IN* (alloc-real (SizeT.from-uint (Uint64.from-long (Long.from-int *SPF*)))))
+(def *RIGHT-CHANNEL-OUT* (alloc-real (SizeT.from-uint (Uint64.from-long (Long.from-int *SPF*)))))
+(def *RIGHT-PLAN* (plan-r2r-1d *SPF* *RIGHT-CHANNEL-IN* *RIGHT-CHANNEL-OUT* FFTWR2HC FFTWEstimate))
+(def *OUTFILE* (fopen "out.pcm" "wb"))
+;; (TTF.init)
+;; (def *FONT* (TTF.open-font (String.cstr "/usr/share/fonts/gsfonts/URWGothic-Book.otf") 12))
+(def *APP* (SDLApp.create "Audio Visualization" 400 300))
+
+(sig stream-read-cb (Fn [(Ptr Stream) CSizeT (Ptr ())] ()))
+(defn stream-read-cb [stream nbytes userdata]
+  (let-do [data (cvp)
+           actualbytes (sizet 0)]
+    (assert (= 0 (stream-peek stream &data &actualbytes)))
+    (if (sizetgt0 actualbytes)
+      (do
+        (if (Pointer.eq NULL data)
+          (println* "Encountered hole")
+          (let-do [out-samples (Int.min (- *SPF* *SAMPLES*) (/ (/ (sizetint actualbytes) 4) 2))
+                   p (vtof data)]
+            ;; (ignore-do (cfwrite data (sizet 4) (sizet (/ (sizetint actualbytes) 4)) *OUTFILE*))
+            ;; (ignore-do (cfwrite data (sizet 4) (sizet (* 2 out-samples)) *OUTFILE*))
+            ;; (IO.raw.fflush! *OUTFILE*)
+            (do-range i 0 out-samples 1
+                      (let-do [l (Pointer.to-value (Pointer.add p (Long.from-int (* 2 i))))
+                               r (Pointer.to-value (Pointer.add p (Long.from-int (+ 1 (* 2 i)))))]
+                        (Pointer.unsafe-set (Pointer.add *LEFT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) l) 
+                        (Pointer.unsafe-set (Pointer.add *RIGHT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) r)
+                        ;; (println* "L " l " r " r)
+                        ))
+            ;; (println* "SAMPLES " *SAMPLES* " OUT " out-samples)
+            (set! *SAMPLES* (+ *SAMPLES* out-samples))))
+        (assert (= 0 (stream-drop stream))))
+      (println* "Read no bytes from stream")
+      )))
+
+(sig server-info-cb (Fn [(Ptr Context) (Ref ServerInfo) (Ptr ())] ()))
+(defn server-info-cb [context info userdata]
+  (let-do [spec (SampleSpec.init SampleFormat.SampleFloat32LE (Uint32.from-long 44100l) (Uint8.from-long 2l))
+           stream (stream-new context (String.cstr "output monitor") &spec (Pointer.to-ref NULL))
+           monitor (String.concat &[@(from-cstring (ServerInfo.default_sink_name info)) @".monitor"])]
+    (stream-set-state-callback stream (Function.unsafe-ptr &stream-notify-cb) NULL)
+    (stream-set-read-callback stream (Function.unsafe-ptr &stream-read-cb) NULL)
+    ;; (println* "server info cb. monitor: " &monitor)
+    (assert (= 0 (stream-connect-record stream (String.cstr &monitor) (Pointer.to-ref NULL) StreamFlags.NoFlags)))
+    ;; (println* "Connected to " &monitor)
+    ))
+
+(defn stream-state-cb [stream mainloop]
+  (threaded-mainloop-signal mainloop 0))
+
+(defn stream-success-cb [stream success userdata]
+  ())
+
+(sig tick (Fn [Int] Int))
+(defn tick [state]
+  state)
+
+(sig draw (Fn [(Ref SDLApp) (Ptr SDL_Renderer) (Ref Int)] ()))
+(defn draw [app rend state]
+  (let-do [lc (Pointer.to-value *LEFT-CHANNEL-IN*)
+           rc (Pointer.to-value *RIGHT-CHANNEL-IN*)]
+    ;; (when (> lc 1f) (println* "LC GT " lc))
+    ;; (when (> rc 1f) (println* "RC GT " rc))
+    (when (>= *SAMPLES* *SPF*)
+      (execute *LEFT-PLAN*)
+      (execute *RIGHT-PLAN*)
+      (let-do [lv 0f
+               lf 0
+               rv 0f
+               rf 0]
+        
+        (do-range i 20 20000 1
+                  (let-do [lval (Pointer.to-value (Pointer.add *LEFT-CHANNEL-OUT* (Long.from-int i)))
+                           rval (Pointer.to-value (Pointer.add *RIGHT-CHANNEL-OUT* (Long.from-int i)))]
+                    ;; (println* "LVAL " lval " RVAL " rval)
+                    (if (> lval lv)
+                      (do
+                        (set! lv lval)
+                        (set! lf (* (/ *RATE* *SPF*) i))
+                        ;; (println* "LV " lval " LF " lf)
+                        )
+                      ())
+                    (if (> rval rv)
+                      (do
+                        (set! rv rval)
+                        (set! rf (* (/ *RATE* *SPF*) i)))
+                      ())))
+        (println* "LF " lf " RF " rf)
+        )
+      (SDL.set-render-draw-color rend 0 0 0 255)
+      (SDL.render-clear rend)
+      (SDL.set-render-draw-color rend
+                                 0 0 255 255)
+      (SDL.render-fill-rect rend (Pointer.address &(SDL.rect 100 (+ 145 (round (Float.* 145.0f lc))) 10 10)))
+      (SDL.set-render-draw-color rend
+                                 255 0 0 255)
+      (SDL.render-fill-rect rend (Pointer.address &(SDL.rect 300 (+ 145 (round (Float.* 145.0f rc))) 10 10)))
+      (set! *SAMPLES* 0))))
+
+(defn main []
+  (let-do [mainloop (threaded-mainloop-new)
+           mainloop-api (threaded-mainloop-get-api mainloop)
+           context (context-new mainloop-api (String.cstr "test"))
+           state-readyp (fn [] (let-do [state (context-get-state context)]
+                                 (assert (= 1 (context-is-good state)))
+                                 (= ContextState.ContextReady state)))]
+    ;; (IO.println "Beginning PulseAudio Test")
+    (threaded-mainloop-lock mainloop)
+    (context-set-state-callback context (Function.unsafe-ptr &context-state-cb) (Unsafe.coerce mainloop))
+    ;; (IO.println "Set CB")
+    (assert (= 0 (threaded-mainloop-start mainloop)))
+    (assert (= 0 (context-connect context NULL ContextFlags.ContextNoAutoSpawn NULL)))
+    ;; (IO.println "Waiting for context ready")
+    (until (state-readyp)
+           (do
+             ;; (IO.println "About to wait")
+             (threaded-mainloop-wait mainloop)
+             ;; (IO.println "Done waiting")
+             ))
+    (context-get-server-info context (Function.unsafe-ptr &server-info-cb) NULL)
+    (threaded-mainloop-unlock mainloop)
+    (SDLApp.run-with-callbacks &*APP* SDLApp.quit-on-esc tick draw 0)
+    0))
