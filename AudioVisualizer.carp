@@ -3,8 +3,10 @@
 (load-and-use SDL_ttf)
 (use PulseAudio)
 (def *RATE* 44100)
-(def *FRAMES* 1)
+(def *FRAMES* 15)
 (def *SPF* (/ *RATE* *FRAMES*))
+(def *RES* (/ *RATE* *SPF*))
+(def *ZEROF* 0f)
 
 (defmacro when [pred :rest rest]
   `(if %pred (do %@rest) ()))
@@ -94,20 +96,29 @@
       (do
         (if (Pointer.eq NULL data)
           (println* "Encountered hole")
-          (let-do [out-samples (Int.min (- *SPF* *SAMPLES*) (/ (/ (sizetint actualbytes) 4) 2))
+          (let-do [out-samples (- *SPF* *SAMPLES*)
                    p (vtof data)]
             ;; (ignore-do (cfwrite data (sizet 4) (sizet (/ (sizetint actualbytes) 4)) *OUTFILE*))
             ;; (ignore-do (cfwrite data (sizet 4) (sizet (* 2 out-samples)) *OUTFILE*))
             ;; (IO.raw.fflush! *OUTFILE*)
-            (do-range i 0 out-samples 1
-                      (let-do [l (Pointer.to-value (Pointer.add p (Long.from-int (* 2 i))))
-                               r (Pointer.to-value (Pointer.add p (Long.from-int (+ 1 (* 2 i)))))]
-                        (Pointer.unsafe-set (Pointer.add *LEFT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) l) 
-                        (Pointer.unsafe-set (Pointer.add *RIGHT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) r)
-                        ;; (println* "L " l " r " r)
-                        ))
+            ;; (println* "Samps per chan " (/ (/ (sizetint actualbytes) 4) 2))
+            (if (> (/ (/ (sizetint actualbytes) 4) 2) out-samples)
+              (do-range i 0 out-samples 1
+                        ;; (ignore-do (cfwrite (Unsafe.coerce (Pointer.address &0f)) (sizet 4) (sizet 1) *OUTFILE*))
+                        ;; (ignore-do (cfwrite (Unsafe.coerce (Pointer.address &0f)) (sizet 4) (sizet 1) *OUTFILE*))
+                        (Pointer.unsafe-set (Pointer.add *LEFT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) 0f)
+                        (Pointer.unsafe-set (Pointer.add *RIGHT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) 0f))
+              (do-range i 0 (/ (/ (sizetint actualbytes) 4) 2) 1
+                        (let-do [l (Pointer.to-value (Pointer.add p (Long.from-int (* 2 i))))
+                                 r (Pointer.to-value (Pointer.add p (Long.from-int (+ 1 (* 2 i)))))]
+                          ;; (ignore-do (cfwrite (Unsafe.coerce (Pointer.add p (Long.from-int (* 2 i)))) (sizet 4) (sizet 1) *OUTFILE*))
+                          ;; (ignore-do (cfwrite (Unsafe.coerce (Pointer.add p (Long.from-int (+ 1 (* 2 i))))) (sizet 4) (sizet 1) *OUTFILE*))
+                          (Pointer.unsafe-set (Pointer.add *LEFT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) l) 
+                          (Pointer.unsafe-set (Pointer.add *RIGHT-CHANNEL-IN* (Long.from-int (+ *SAMPLES* i))) r)
+                          ;; (println* "L " l " r " r)
+                          )))
             ;; (println* "SAMPLES " *SAMPLES* " OUT " out-samples)
-            (set! *SAMPLES* (+ *SAMPLES* out-samples))))
+            (set! *SAMPLES* (+ *SAMPLES* (Int.min (/ (/ (sizetint actualbytes) 4) 2) out-samples)))))
         (assert (= 0 (stream-drop stream))))
       (println* "Read no bytes from stream")
       )))
@@ -148,7 +159,7 @@
                rv 0f
                rf 0]
         
-        (do-range i 20 20000 1
+        (do-range i (/ 20 *RES*) (/ 20000 *RES*) 1
                   (let-do [lval (Pointer.to-value (Pointer.add *LEFT-CHANNEL-OUT* (Long.from-int i)))
                            rval (Pointer.to-value (Pointer.add *RIGHT-CHANNEL-OUT* (Long.from-int i)))]
                     ;; (println* "LVAL " lval " RVAL " rval)
